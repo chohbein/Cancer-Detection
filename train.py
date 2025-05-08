@@ -32,6 +32,8 @@ from torch.optim.lr_scheduler import StepLR
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, roc_auc_score
 
+from torch.amp import autocast, GradScaler
+
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
 
@@ -80,55 +82,32 @@ class TestImageDataset(Dataset):
 
         return image, img_id
 
-
-
-class TestImageDF(Dataset):
-    def __init__(self, dataframe, root_dir, transform=None):
-        self.data = dataframe
-        self.root_dir = root_dir
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        img_id = row['id']
-        img_path = os.path.join(self.root_dir, img_id + ".tif")
-        try:
-            image = Image.open(img_path).convert("RGB")
-            if self.transform:
-                image = self.transform(image)
-        except Exception as e:
-            print(f"[WARNING] Failed to load image {img_path}: {e}")
-            image = torch.zeros((3, 46, 46))
-        return image, img_id
-
-
 import torch.nn.functional as F
 
 #   Class for 1st Iteration
 class CNNClassifier1(nn.Module):
     def __init__(self):
         super(CNNClassifier1, self).__init__()
-        self.conv1 = nn.Conv2d(3,32,kernel_size=3,stride=2,padding=1)
+        self.conv1 = nn.Conv2d(3,32,kernel_size=3,stride=1,padding=1)
         self.bn1 = nn.BatchNorm2d(32)
 
-        self.conv2 = nn.Conv2d(32,64,kernel_size=3,stride=2,padding=1)
+        self.conv2 = nn.Conv2d(32,64,kernel_size=1,stride=1,padding=0)
         self.bn2 = nn.BatchNorm2d(64)
 
-        self.conv3 = nn.Conv2d(64, 128,kernel_size=3,stride=2,padding=1)
+        self.conv3 = nn.Conv2d(64, 128,kernel_size=3,stride=1,padding=1)
         self.bn3 = nn.BatchNorm2d(128)
 
-        self.conv4 = nn.Conv2d(128, 256,kernel_size=3,stride=2,padding=1)
+        self.conv4 = nn.Conv2d(128, 256,kernel_size=1,stride=1,padding=0)
         self.bn4 = nn.BatchNorm2d(256)
 
-        self.conv5 = nn.Conv2d(256, 512,kernel_size=3,stride=2,padding=1)
-        self.bn5 = nn.BatchNorm2d(512)
+        self.conv5 = nn.Conv2d(256, 384,kernel_size=3,stride=1,padding=1)
+        self.bn5 = nn.BatchNorm2d(384)
+        self.pool5 = nn.MaxPool2d(2, 2)
 
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.dropout = nn.Dropout(0.3)  #   Dropout reduces overfitting
-        self.fc1 = nn.Linear(512 * 2 * 2, 256)  #   Flatten 
-        self.fc2 = nn.Linear(256, 1)    #   Flatten
+        self.fc1 = nn.Linear(384, 128)  #   FC layer
+        self.fc2 = nn.Linear(128, 1)
     
     def forward(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
@@ -136,10 +115,11 @@ class CNNClassifier1(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = F.relu(self.bn4(self.conv4(x)))
         x = F.relu(self.bn5(self.conv5(x)))
+        x = self.pool5(x)
+        x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.fc2(x)
-        
         return x
 
 #   Class for 2nd iteration
@@ -155,16 +135,17 @@ class CNNClassifier2(nn.Module):
         self.bn2 = nn.BatchNorm2d(64)
         self.pool2 = nn.MaxPool2d(2, 2)
 
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=5, stride=1, padding=2)
-        self.bn3 = nn.BatchNorm2d(128)
+        self.conv3 = nn.Conv2d(64, 96, kernel_size=5, stride=1, padding=2)
+        self.bn3 = nn.BatchNorm2d(96)
         self.pool3 = nn.MaxPool2d(2, 2)
 
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=5, stride=1, padding=2)
-        self.bn4 = nn.BatchNorm2d(256)
+        self.conv4 = nn.Conv2d(96, 192, kernel_size=5, stride=1, padding=2)
+        self.bn4 = nn.BatchNorm2d(192)
         self.pool4 = nn.MaxPool2d(2, 2)
         
-        self.fc1 = nn.Linear(256 * 5 * 5, 512)
-        self.fc2 = nn.Linear(512, 1)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc1 = nn.Linear(192, 92)  # Match flattened dimension
+        self.fc2 = nn.Linear(92, 1)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
@@ -175,9 +156,10 @@ class CNNClassifier2(nn.Module):
         x = F.relu(self.bn3(self.conv3(x)))
         x = self.pool3(x)
         x = F.relu(self.bn4(self.conv4(x)))
+        x = self.pool4(x)
 
+        x = self.adaptive_pool(x)
         x = x.view(x.size(0), -1)
-        
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.fc2(x)
         return x
@@ -204,19 +186,23 @@ class EarlyStopping:
                 self.early_stop = True
 '''
 
-def transform():
-    transform = transforms.Compose([
-        transforms.Resize((46, 46)),
+def get_transform():
+    train_transforms = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
 
+    return train_transforms
+
+def load_data():
     # Load labels CSV
     labels_df = pd.read_csv('train/_labels.csv')
-
-    # Create dataset instance
-    df = ImageDF(dataframe=labels_df, root_dir='train', transform=transform)
-
+    
+    # Create dataset instance with the transforms object
+    train_transforms = get_transform()
+    df = ImageDF(dataframe=labels_df, root_dir='train', transform=train_transforms)
+    
     return df
 
 def evaluate_model(model, val_loader, device, criterion):
@@ -247,6 +233,20 @@ def evaluate_model(model, val_loader, device, criterion):
 
 #       First iteration
 def get_loader(iter_type,train_df,val_df):
+
+    #   TEMP: Subset the df's for quicker train
+    '''subset_size = 5000
+    train_subset_size = int(0.8 * subset_size)
+    val_subset_size = subset_size - train_subset_size
+
+    train_indices = torch.randperm(len(train_df))[:train_subset_size]
+    subset_train = Subset(train_df, train_indices)
+
+    val_indices = torch.randperm(len(val_df))[:val_subset_size]
+    subset_val = Subset(val_df, val_indices)'''
+
+
+
     if iter_type == 1:
         model = CNNClassifier1().to(device)
     else:
@@ -256,14 +256,14 @@ def get_loader(iter_type,train_df,val_df):
         train_df,
         batch_size=64,  # Increase batch size for better GPU utilization
         shuffle=True,
-        num_workers=6,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True  # Reduces worker respawn overhead
     )
 
     val_loader = DataLoader(
         val_df,
-        batch_size = 64,
+        batch_size = 128,
         shuffle = True,
         num_workers = 6,
         pin_memory = True,
@@ -284,7 +284,11 @@ if __name__ == "__main__":
     for t in [1,2]:
         iter_type = t
 
-        df = transform()
+        #   Final product; going with iter 1
+        if iter_type == 2:
+            continue
+
+        df = load_data()
 
         #   Train/Val Split
         df_size = len(df)
@@ -296,7 +300,7 @@ if __name__ == "__main__":
         train_loader,val_loader,model = get_loader(iter_type,train_df,val_df)
 
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(model.parameters(), lr=0.0001)   #   Adam
+        optimizer = optim.Adam(model.parameters(), lr=0.001)   #   Adam
 
         #   LR Scheduler, avoids overfitting
         #scheduler = StepLR(optimizer, step_size=4, gamma=0.5)
@@ -308,20 +312,32 @@ if __name__ == "__main__":
         val_losses = []
         #early_stopping = EarlyStopping(patience=1, min_delta=0.001)
 
+        scaler = GradScaler('cuda')
+        torch.backends.cudnn.benchmark = True
+
         for epoch in range(num_epochs):
             model.train()
             running_loss = 0.0
-            for images, labels in train_loader:
+            for i, (images, labels) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")):
                 images = images.to(device)
                 labels = labels.to(device)
 
                 optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs.squeeze(), labels.float())
-                loss.backward()
-                optimizer.step()
+                # Mixed precision forward pass
+                with autocast('cuda'):
+                    outputs = model(images)
+                    loss = criterion(outputs.squeeze(), labels.float())
+                
+                # Mixed precision backward pass
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 running_loss += loss.item() * images.size(0)  # batch loss
+                
+                # Progress prints
+                if i % 10 == 0:
+                    print(f"Batch {i}/{len(train_loader)}, Loss: {loss.item():.4f}")
 
             avg_train_loss = running_loss / len(train_loader.dataset)
             train_losses.append(avg_train_loss)
