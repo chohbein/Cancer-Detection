@@ -10,7 +10,7 @@ For this project, I build a CNN model to predict cancer in histopathologic image
 
 
 ## Results
-![image.png](attachment:image.png)
+![My Image](img.png)
 Due to the nature of the problem, I also wanted to minimize false-negatives; which I got down to 2%. <br>
 
 ## Compute Problems 
