@@ -5,7 +5,7 @@ Data found here: https://www.kaggle.com/competitions/histopathologic-cancer-dete
 To replicate, download zip files and follow instructions within 'CNN Cancer Project' notebook
 
 
-## Approach
+## What is it?
 For this project, I build a CNN model to predict cancer in histopathologic images and tested multiple hypotheses to determine the optimal architecture. I elected to build the model architecture from scratch without the use of pre-trained weights, (e.g. ImageNet), to not only challenge myself but gain a deeper understanding of optimization and limitations of computational constraints. Models were trained using PyTorch and optimized with GPU-acceleration and more specific approaches such as mixed precision (GradScaler).
 
 
